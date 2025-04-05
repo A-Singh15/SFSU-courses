@@ -1,308 +1,481 @@
-import streamlit as st
 import os
-import getpass
-from langchain_openai import ChatOpenAI
-from dotenv import load_dotenv
-from pinecone import Pinecone
-from sentence_transformers import SentenceTransformer
-from tqdm.autonotebook import tqdm
-from collections import defaultdict
-from langgraph.graph import MessagesState, StateGraph
-from langchain_core.tools import tool
-from langchain_core.messages import SystemMessage, HumanMessage
-from langgraph.prebuilt import ToolNode
-from langgraph.graph import END
-from langgraph.prebuilt import ToolNode, tools_condition
-import time
-from langchain_google_genai import ChatGoogleGenerativeAI
+import streamlit as st
+import httpx
 import asyncio
+import nest_asyncio
+import pandas as pd
+from dotenv import load_dotenv
+from langchain_core.messages import HumanMessage, SystemMessage
 
+###############################################################################
+# 1) SETUP
+###############################################################################
+nest_asyncio.apply()
 load_dotenv()
+st.set_page_config(page_title="SFSU Course Recommender", layout="wide")
 
-os.environ["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY")
-os.environ["LANGCHAIN_TRACING_V2"] = "true"
-os.environ["LANGCHAIN_API_KEY"] = os.environ.get("LANGCHAIN_API_KEY_V2")
 
-llm = ChatOpenAI(model="gpt-4o-mini")
-pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
-index_name = "fitness-chatbot-enhanced"
-index = pc.Index(index_name)
-embed_model = SentenceTransformer('multi-qa-mpnet-base-dot-v1')
+###############################################################################
+# 2) LLM CLASS (UNCHANGED)
+###############################################################################
+class GroqLLM:
+    def __init__(self, model="llama3-70b-8192", api_key=None):
+        self.model = model
+        self.api_key = api_key or os.getenv("GROQ_API_KEY")
 
-@tool(response_format="content_and_artifact")
-def retrieve(query: str):
-    """Retrieve detailed fitness information, including exercises, nutrition, and injury prevention strategies, based on the user’s input."""
-    query_embedding = embed_model.encode(query).tolist()
-    results = index.query(vector=query_embedding, top_k=5, include_metadata=True)
-    
-    chunk_ids = set()
-    video_ids = set()
+    def _serialize_message(self, msg):
+        if isinstance(msg, HumanMessage):
+            return {"role": "user", "content": msg.content}
+        elif isinstance(msg, SystemMessage):
+            return {"role": "system", "content": msg.content}
+        raise TypeError("Unsupported message type")
 
-    for match in results.matches:
-        chunk_id = match['id']
-        video_id, chunk_info = chunk_id.split('_', 1)
-        chunk_number, total_chunks = chunk_info.split(' of ')
-
-        if video_id not in video_ids:
-            video_ids.add(video_id)
-            for i in range(1, int(total_chunks) + 1):
-                chunk_ids.add(f"{video_id}_{i} of {total_chunks}")
-        
-        if len(video_ids) >= 3:
-            break
-
-    chunk_ids_list = list(chunk_ids)
-
-    results = index.fetch(ids=chunk_ids_list)
-    video_chunks = defaultdict(list)
-
-    for chunk_id, chunk_data in  results.vectors.items():
-        video_id = chunk_data['metadata']['video_id']
-        chunk_content = chunk_data['metadata']['content']
-        thumbnail_url = chunk_data['metadata'].get('thumbnail_url', None)
-        title = chunk_data['metadata'].get('title', None)
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-        
-        video_chunks[video_id].append((chunk_id, chunk_content, thumbnail_url, video_url, title))
-
-    complete_transcripts = {}
-
-    for video_id, chunks in video_chunks.items():
-        chunks.sort(key=lambda x: int(x[0].split('_')[1].split(' of ')[0]))
-        complete_transcript = " ".join(chunk_content for _, chunk_content, _, _, _ in chunks)
-        
-        thumbnail_url = chunks[0][2]
-        video_url = chunks[0][3]
-        title = chunks[0][4]
-        
-        complete_transcripts[video_id] = {
-            "transcript": complete_transcript,
-            "thumbnail_url": thumbnail_url,
-            "video_url": video_url,
-            "title": title
+    def invoke(self, messages):
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
         }
-    final_context = []
-    for video_id, data in complete_transcripts.items():
-        final_context.append(f"{data['transcript']}")
-    final_context_document = "\n\n".join(final_context)
-        
-    return final_context_document, complete_transcripts
+        payload = {"model": self.model, "messages": [self._serialize_message(m) for m in messages]}
+        try:
+            response = httpx.post(url, headers=headers, json=payload, timeout=30.0)
+            return response.json()["choices"][0]["message"]
+        except Exception as e:
+            return {"content": f"Error: {e}"}
 
 
-def query_or_respond(state: MessagesState):
-    llm_with_tools = llm.bind_tools([retrieve])
-    response = llm_with_tools.invoke(state["messages"])
-    return {"messages": [response]}
+llm = GroqLLM()
 
-tools = ToolNode([retrieve])
+###############################################################################
+# 3) THEME TOGGLE & CSS
+###############################################################################
+theme = st.sidebar.radio("Theme", ["Dark", "Light"], index=0)
+dark = (theme == "Dark")
 
-def generate(state: MessagesState):
-    recent_tool_messages = []
-    for message in reversed(state["messages"]):
-        if message.type == "tool":
-            recent_tool_messages.append(message)
-        else:
-            break
-    tool_messages = recent_tool_messages[::-1]
+DARK_CSS = """
+<style>
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: #0e0e0e !important;
+    color: #f1f1f1 !important;
+    padding-bottom: 5rem;
+}
+h1 {
+    text-align: center;
+    font-size: 2.6rem;
+    margin-bottom: 0.2rem;
+}
+p.subtitle {
+    text-align: center;
+    color: #ccc;
+    margin: 0 0 1.5rem 0;
+}
+.chat-box {
+    max-width: 720px;
+    margin: auto;
+}
+.chat-bubble {
+    padding: 1rem;
+    border-radius: 18px;
+    margin: 0.5rem 0;
+    word-wrap: break-word;
+    animation: fadeIn 0.3s ease-in-out;
+    font-size: 1.02rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+}
+.chat-bubble.user {
+    background-color: #1a1a2a;
+    border-left: 4px solid #bb6bff;
+}
+.chat-bubble.assistant {
+    background-color: #111820;
+    border-left: 4px solid #7ac1ff;
+}
+.course-card {
+    background-color: #1a1a2a;
+    border-radius: 10px;
+    padding: 1rem;
+    margin: 0.5rem 0;
+    border-left: 4px solid #7ac1ff;
+}
+@keyframes fadeIn {
+  0% {opacity: 0; transform: translateY(10px);}
+  100% {opacity: 1; transform: translateY(0);}
+}
+</style>
+"""
 
-    all_transcripts = {}
+LIGHT_CSS = """
+<style>
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: #f9f9f9 !important;
+    color: #111 !important;
+    padding-bottom: 5rem;
+}
+h1 {
+    text-align: center;
+    font-size: 2.6rem;
+    margin-bottom: 0.2rem;
+}
+p.subtitle {
+    text-align: center;
+    color: #333;
+    margin: 0 0 1.5rem 0;
+}
+.chat-box {
+    max-width: 720px;
+    margin: auto;
+}
+.chat-bubble {
+    padding: 1rem;
+    border-radius: 18px;
+    margin: 0.5rem 0;
+    word-wrap: break-word;
+    animation: fadeIn 0.3s ease-in-out;
+    font-size: 1.02rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+}
+.chat-bubble.user {
+    background-color: #e0e0e0;
+    border-left: 4px solid #bb6bff;
+}
+.chat-bubble.assistant {
+    background-color: #e5f0ff;
+    border-left: 4px solid #7ac1ff;
+}
+.course-card {
+    background-color: #e5f0ff;
+    border-radius: 10px;
+    padding: 1rem;
+    margin: 0.5rem 0;
+    border-left: 4px solid #7ac1ff;
+}
+@keyframes fadeIn {
+  0% {opacity: 0; transform: translateY(10px);}
+  100% {opacity: 1; transform: translateY(0);}
+}
+</style>
+"""
 
-    docs_content = ""
-    for doc in tool_messages:
-        docs_content += doc.content
-        if doc.artifact:
-          all_transcripts.update(doc.artifact)
+st.markdown(DARK_CSS if dark else LIGHT_CSS, unsafe_allow_html=True)
 
-    system_message_content = f"""
-    You are a professional fitness and workout assistant specializing in providing evidence-based advice tailored to beginners. You assist with:
-    - Exercise recommendations for different fitness goals (e.g., muscle gain, weight loss, flexibility).
-    - Nutrition advice, including meal planning and supplementation.
-    - Safety and injury prevention during workouts.
+###############################################################################
+# 4) TITLE & SUBTITLE
+###############################################################################
+st.markdown("<h1>🎓 SFSU Course Recommender</h1>", unsafe_allow_html=True)
+st.markdown("<p class='subtitle'>Find the perfect courses for your degree program</p>", unsafe_allow_html=True)
 
-    CONTEXT PROCESSING:
-    - First analyze all provided context thoroughly before responding
-    - Prioritize information directly from the provided context
-    - When multiple pieces of context are relevant, synthesize them coherently
-    - If context is insufficient for the query, acknowledge the limitation
 
-    RESPONSE PRINCIPLES:
-    - Always ground your responses in the provided context
-    - Use clear, jargon-free language
-    - Break down complex concepts into digestible steps
-    - Emphasize proper form and technique
-    - Include relevant safety disclaimers
-    - Provide actionable, bite-sized recommendations
-
-    RESPONSE STRUCTURE:
-    - Begin with a direct answer to the user's question
-    - Support answers with specific references from the context
-    - Provide practical implementation steps
-    - Include relevant safety considerations
-    - End with clear next steps or recommendations
-
-    KNOWLEDGE BOUNDARIES:
-    - Only provide advice based on available context
-    - Clearly distinguish between general principles and specific recommendations
-    - If medical advice is needed, direct users to healthcare professionals
-    - Acknowledge when a question requires expertise beyond the provided context
-
-    QUERY HANDLING:
-    - Consider user's fitness level when providing recommendations
-    - Ensure all advice is suitable for beginners
-
-    KNOWLEDGE-BASE CONTEXT: 
-    {docs_content}
-        """
-    conversation_messages = [
-        message
-        for message in state["messages"]
-        if message.type in ("human", "system")
-        or (message.type == "ai" and not message.tool_calls)
+###############################################################################
+# 5) LOAD MAJORS FROM DATA
+###############################################################################
+def load_majors():
+    # This function loads all majors from the SFSU academic bulletin
+    majors = [
+        "Accountancy: Master's Degree",
+        "Accounting: Bachelor's Concentration, Graduate Certificate",
+        "African Studies: Minor",
+        "Africana Studies: Bachelor's Degree, Minor",
+        "American Indian Studies: Bachelor's Degree, Minor",
+        "American Studies: Bachelor's Degree, Minor",
+        "Animation: Minor",
+        "Anthropology: Bachelor's Degree, Minor, Master's Degree",
+        "Apparel Design & Merchandising, Design: Bachelor's Concentration",
+        "Apparel Design and Merchandising, Merchandising: Bachelor's Concentration",
+        "Applied Mathematics: Bachelor's Degree",
+        "Arab & Muslim Ethnicities & Diasporas Studies: Minor",
+        "Art: Bachelor's Degree, Minor, Master's Degree",
+        "Art, Art History & Studio Art: Bachelor's Concentration",
+        "Art, Studio Art: Bachelor's Degree, Minor",
+        "Art History: Bachelor's Degree, Minor",
+        "Asian American Studies: Bachelor's Degree, Minor, Master's Degree",
+        "Astronomy: Bachelor's Concentration, Minor",
+        "Astronomy & Astrophysics: Master's Degree",
+        "Astrophysics: Bachelor's Concentration",
+        "Athletic Coaching: Minor",
+        "Augmentative & Alternative Communication: Graduate Certificate",
+        "Autism Studies: Graduate Certificate",
+        "Bilingual Spanish Journalism: Bachelor's Degree, Minor",
+        "Biochemistry: Bachelor's Degree, Master's Concentration",
+        "Biology, General: Bachelor's Degree, Minor",
+        "Biology, Cell & Molecular: Bachelor's Concentration, Master's Concentration",
+        "Biology, Ecology, Evolution, and Conservation Biology: Bachelor's Concentration",
+        "Biology, Integrative Biology: Masters Concentration",
+        "Biology, Marine Science: Bachelor's Concentration",
+        "Biology, Microbiology: Bachelor's Concentration",
+        "Biology, Physiology: Bachelor's Concentration",
+        "Biology, Physiology & Behavioral Biology: Master's Concentration",
+        "Biomedical Science, Biotechnology: Master's Concentration",
+        "Biomedical Science, Stem Cell Science: Master's Concentration",
+        "Biotechnology: Master's Concentration",
+        "Biotechnology - Data Science and Machine Learning for: Certificate",
+        "Broadcast & Electronic Communication Arts: Bachelor's Degree, Master's Degree, Master's of Fine Arts, Minor",
+        "Business Administration: Minor, Master's Degree",
+        "Business Administration, Accounting: Bachelor's Concentration",
+        "Business Administration, Decision Sciences: Bachelor's Concentration",
+        "Business Administration, Finance: Bachelor's Concentration, Graduate Certificate",
+        "Business Administration, General Business: Bachelor's Concentration",
+        "Business Administration, Information Systems: Bachelor's Concentration",
+        "Business Administration, International Business: Bachelor's Concentration",
+        "Business Administration, Management: Bachelor's Concentration",
+        "Business Administration, Marketing: Bachelor's Concentration",
+        "Business Analytics: Bachelor's Concentration, Master's Degree, Certificate",
+        "Business Ethics & Compliance: Graduate Certificate",
+        "Business Principles: Graduate Certificate",
+        "California Studies: Minor",
+        "Cell & Molecular Biology: Bachelor's Concentration, Master's Concentration",
+        "Chemistry: Bachelor of Arts, Bachelor of Science, Minor, Master's Degree",
+        "Child & Adolescent Development, Community, Health, and Social Services: Bachelor's Concentration",
+        "Child & Adolescent Development, Early Care and Education: Bachelor's Concentration",
+        "Child & Adolescent Development, Elementary Education Teaching Pre-Credential: Bachelor's Concentration",
+        "Child Development Pre-K to 3rd Grade: Bachelor's Degree",
+        "Chinese: Master's Degree",
+        "Chinese, Flagship Chinese: Bachelor's Concentration",
+        "Chinese Language: Bachelor's Concentration, Minor",
+        "Chinese Literature & Linguistics: Bachelor's Concentration, Minor",
+        "Cinema: Bachelor's Degree, Minor, Master's Degree",
+        "Cinema Studies: Master's Degree",
+        "Civil Engineering: Bachelor's Degree, Minor, Master's Degree",
+        "Classics: Bachelor's Degree, Minor, Master's Degree",
+        "Climate Change Causes, Impacts, and Solutions: Certificate",
+        "Climate Justice Education - PK-12, Graduate Certificate",
+        "Clinical Laboratory Science: Graduate Certificate",
+        "Clinical Mental Health Counseling: Master's Degree",
+        "Clinical Psychology: Master's Concentration",
+        "Comic Studies: Minor",
+        "Communication Studies: Bachelor's Degree, Minor, Master's Degree",
+        "Comparative & World Literature: Bachelor's Degree, Minor, Master's Degree",
+        "Composition: Master's Concentration",
+        "Composition, Teaching of: Graduate Certificate",
+        "Computational Linguistics: Undergraduate Certificate, Graduate Certificate",
+        "Computer Engineering: Bachelor's Degree, Minor",
+        "Computer Science: Bachelor's Degree, Minor, Master's Degree",
+        "Computing Applications: Minor",
+        "Conflict Resolution: Certificate",
+        "Cooperative Education: Certificate",
+        "Counseling: Minor, Master's Degree",
+        "Creative Nonfiction Comics Making: Certificate",
+        "Creative Writing: Bachelor's Degree, Minor, Master of Arts, Master of Fine Arts",
+        "Criminal Justice Studies: Bachelor's Degree, CPaGE Bachelor's Degree Completion, Minor",
+        "Critical Mixed Race Studies: Minor",
+        "Critical Pacific Islands & Oceania Studies: Minor",
+        "Critical Social Thought: Minor",
+        "Curriculum and Instruction Master's Degree",
+        "Cybersecurity for Managers: Certificate",
+        "Cybersecurity, Enterprise: Graduate Certificate",
+        "Dance: Bachelor's Degree, Minor",
+        "Data Science and Machine Learning for Biotechnology: Certificate",
+        "Data Science for Psychology: Certificate",
+        "Data Science, Statistical: Master's Degree",
+        "Data Science and Artificial Intelligence: Master's Degree",
+        "Data Science for Biology and Chemistry: Graduate Certificate",
+        "Decision Sciences: Bachelor's Concentration, Minor, Graduate Certificate",
+        "Design: Master's Degree, Minor",
+        "Disability Studies: Minor",
+        "Early Childhood Development: Minor",
+        "Early Childhood Education: Master's Degree",
+        "Earth Sciences: Bachelor of Arts, Bachelor of Science, Minor",
+        "Economics: Bachelor's Degree, Minor, Master's Degree",
+        "Education: Doctoral Degree",
+        "Education: Minor",
+        "Education, Special Interest Area: Master's Concentration",
+        "Educational Administration and Leadership: Master's Degree",
+        "Educational Leadership: Doctoral Degree",
+        "Electrical and Computer Engineering: Master's Degree",
+        "Electrical Engineering: Bachelor's Degree, Minor",
+        "Empowerment Self-Defense: Minor",
+        "Engineering, Civil Engineering: Bachelor's Degree, Minor, Master's Degree",
+        "Engineering, Computer Engineering: Bachelor's Degree, Minor",
+        "Engineering, Electrical Engineering: Bachelor's Degree, Minor",
+        "Engineering, Electrical and Computer Engineering: Master's Degree",
+        "Engineering, Mechanical Engineering: Bachelor's Degree, Minor, Master's Degree"
     ]
-    prompt = [SystemMessage(system_message_content)] + conversation_messages
-    response = llm.invoke(prompt)
+    # This is a subset of the full list for demonstration
+    return sorted(majors)
 
-    return {"messages": [response]}
 
-graph_builder = StateGraph(MessagesState)
-graph_builder.add_node(query_or_respond)
-graph_builder.add_node(tools)
-graph_builder.add_node(generate)
+###############################################################################
+# 6) DEPARTMENT PREFIXES
+###############################################################################
+def load_department_prefixes():
+    # Common department prefixes at SFSU
+    prefixes = [
+        "ACCT", "AFRS", "AIS", "AMST", "ANTH", "ARAB", "ART", "ASTR", "BIOL",
+        "BECA", "BUS", "CHEM", "CAD", "CHIN", "CINE", "CLAS", "CFS", "COMM",
+        "CSC", "COUN", "CJ", "DANC", "DS", "ECON", "ENGR", "EED", "ENG",
+        "ERTH", "ENVS", "ETHS", "FIN", "HIST", "HTM", "HUM", "IBUS", "INFO",
+        "IR", "ISYS", "ITAL", "JAPN", "JS", "KIN", "LTNS", "LS", "MATH",
+        "MGMT", "MKTG", "MUS", "NURS", "PHIL", "PHYS", "PLSI", "PSY", "RRS",
+        "SCI", "SED", "SOC", "SPAN", "SPED", "SW", "TH A", "WGS"
+    ]
+    return sorted(prefixes)
 
-graph_builder.set_entry_point("query_or_respond")
-graph_builder.add_conditional_edges(
-    "query_or_respond",
-    tools_condition,
-    {END: END, "tools": "tools"},
-)
-graph_builder.add_edge("tools", "generate")
-graph_builder.add_edge("generate", END)
 
-graph = graph_builder.compile()
-
-with st.container():
-    col1, col2, col3 = st.columns([1, 6, 1])
-    with col2:
-        st.markdown("<h2 style='text-align: center;'>AthleanX Fitness</h2>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align: center; font-weight: bold;'>Ask me about workouts, nutrition, or injury prevention!</p>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align: center;'>Here are a few common fitness questions:</p>", unsafe_allow_html=True)
-        
-with st.container():
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("What's the best way to prevent age-related muscle loss?"):
-            st.session_state.current_question = "What's the best way to prevent age-related muscle loss?"
-        if st.button("How can I prevent wrist pain during push-ups and planks?"):
-            st.session_state.current_question = "How can I prevent wrist pain during push-ups and planks?"
-    with col2:
-        if st.button("I sit at a desk all day. What exercises can help with posture?"):
-            st.session_state.current_question = "I sit at a desk all day. What exercises can help with posture?"
-        if st.button("Can you suggest a full-body workout routine for beginners?"):
-            st.session_state.current_question = "Can you suggest a full-body workout routine for beginners?"
-    st.markdown("<p style='text-align: center; font-weight: bold; color: #27AE60;'>Expert advice in under 10 seconds!</p>", unsafe_allow_html=True)
-
+###############################################################################
+# 7) SESSION STATE INITIALIZATION
+###############################################################################
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
-if "current_question" not in st.session_state:
-    st.session_state.current_question = None
+if "selected_major" not in st.session_state:
+    st.session_state.selected_major = None
+if "course_prefix" not in st.session_state:
+    st.session_state.course_prefix = ""
+if "course_number" not in st.session_state:
+    st.session_state.course_number = ""
+if "recommendations" not in st.session_state:
+    st.session_state.recommendations = []
 
-def add_message(role, content, recommendations=None, response_time=None):
-    st.session_state.chat_history.append({
-        "role": role,
-        "content": content,
-        "recommendations": recommendations,
-        "response_time": response_time
-    })
+###############################################################################
+# 8) SIDEBAR FOR MAJOR SELECTION
+###############################################################################
+with st.sidebar:
+    st.header("Your Academic Profile")
 
-def display_chat_history():
+    # Major selection
+    majors = load_majors()
+    selected_major = st.selectbox("Select your major:", majors)
+    st.session_state.selected_major = selected_major
+
+    # Academic year
+    year = st.selectbox("Academic Year:", ["Freshman", "Sophomore", "Junior", "Senior", "Graduate"])
+
+    # Completed courses
+    completed_courses = st.text_area("Courses you've already completed (e.g., MATH 226, ENGR 101):")
+
+    # Interests
+    interests = st.text_area("Your academic interests:")
+
+###############################################################################
+# 9) COURSE SEARCH SECTION
+###############################################################################
+st.subheader("Search for Courses")
+col1, col2 = st.columns(2)
+
+with col1:
+    # Department prefix dropdown
+    prefixes = load_department_prefixes()
+    course_prefix = st.selectbox("Select department code:", prefixes, index=0)
+    st.session_state.course_prefix = course_prefix
+
+with col2:
+    # Course number input
+    course_number = st.text_input("Enter course number (optional):", value=st.session_state.course_number)
+    st.session_state.course_number = course_number
+
+
+###############################################################################
+# 10) COURSE RECOMMENDATION FUNCTION
+###############################################################################
+def get_course_recommendations(major, prefix, number=None, completed=None, interests=None):
     """
-    Displays the chat history in the correct chronological order.
-    New messages are appended to the chat history, and the UI is updated dynamically.
+    Use Groq LLM to generate course recommendations based on major and course prefix/number
     """
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            message_placeholder = st.empty()
-            message_placeholder.markdown(message["content"], unsafe_allow_html=True)
+    # Create a prompt for the LLM
+    prompt = f"""
+    As an academic advisor at San Francisco State University, recommend courses for a student with the following profile:
 
-            if message.get("recommendations"):
-                st.subheader("Video Recommendations:")
-                cols = st.columns(min(3, len(message["recommendations"])))
+    Major: {major}
+    Department Code: {prefix}
+    Course Number (if specified): {number}
+    Academic Level: {year}
+    Completed Courses: {completed if completed else 'None specified'}
+    Academic Interests: {interests if interests else 'None specified'}
 
-                for idx, (video_id, data) in enumerate(list(message["recommendations"].items())[:3]):
-                    with cols[idx]:
-                        st.image(data['thumbnail_url'], use_container_width=True)
-                        st.write(f"**{data['title']}**")
-                        st.markdown(f"[Watch Video]({data['video_url']})")
+    Please recommend 3-5 specific courses from the {prefix} department that would be appropriate for this student's major and academic level.
+    For each course, provide:
+    1. Course code (e.g., {prefix} 101)
+    2. Course title
+    3. Number of units
+    4. Brief description
+    5. How it relates to their major
+    6. Any prerequisites
 
-async def stream_response(prompt):
-    start_time = time.time()
-    with st.chat_message("assistant"):  
-        with st.spinner("✨ Gathering fitness insights... ✨"):
-            message_placeholder = st.empty()
-            # tools_placeholder = st.empty()  # Placeholder for tool updates
-            full_response = ""
-            all_transcripts = {}
-            # tool_updates = []
+    Format your response as a structured list of courses without any introductory text.
+    """
 
-            async for message, metadata in graph.astream(
-                {"messages": [HumanMessage(content=prompt)]},
-                stream_mode="messages",  # Stream all messages
-            ):
-                # Handle only AI-generated responses
-                if not isinstance(message, HumanMessage) and message.type != "tool":
-                    full_response += message.content
-                    message_placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
-                    # await asyncio.sleep(0.05)
+    # Call the LLM
+    response_data = llm.invoke([HumanMessage(content=prompt)])
+    recommendations_text = response_data.get("content", "Unable to generate recommendations.")
 
-                # # Display tool call information
-                # if message.type == "tool":
-                #     tool_updates.append(f"Tool Called: {message.tool_name}")
-                #     tools_placeholder.markdown(
-                #         "<br>".join(tool_updates), 
-                #         unsafe_allow_html=True
-                #     )
+    # Parse the recommendations (in a real application, you'd parse this more robustly)
+    # For now, we'll return a list of dictionaries with the course information
+    courses = []
 
-                # Store transcripts if tool generates artifacts
-                if message.type == "tool" and message.artifact:
-                    all_transcripts.update(message.artifact)
+    # Simple parsing logic - this would be more sophisticated in a real application
+    course_blocks = recommendations_text.split("\n\n")
+    for block in course_blocks:
+        if not block.strip():
+            continue
 
-            # Final AI response display
-            message_placeholder.markdown(full_response.strip(), unsafe_allow_html=True)
+        lines = block.strip().split("\n")
+        if not lines:
+            continue
 
-            # Display recommendations
-            if all_transcripts:
-                st.subheader("Video Recommendations:")
-                cols = st.columns(min(3, len(all_transcripts)))
-                for idx, (video_id, data) in enumerate(list(all_transcripts.items())[:3]):
-                    if idx >= 3:
-                        break
-                    with cols[idx]:
-                        st.image(data['thumbnail_url'], use_container_width=True)
-                        st.write(f"**{data['title']}**")
-                        st.markdown(f"[Watch Video]({data['video_url']})")
-    end_time = time.time()
-    response_time = end_time - start_time
-    return full_response, all_transcripts, response_time
+        # Extract course code and title from the first line
+        first_line = lines[0]
+        if ":" in first_line:
+            code_title = first_line.split(":", 1)
+            code = code_title[0].strip()
+            title = code_title[1].strip() if len(code_title) > 1 else ""
+        else:
+            code = first_line
+            title = ""
 
-if st.session_state.current_question:
-    add_message("user", st.session_state.current_question)
-    with st.chat_message("user"):
-        st.markdown(st.session_state.current_question)
-    response, recommendations, response_time = asyncio.run(
-        stream_response(st.session_state.current_question)
-    )
-    add_message("assistant", response, recommendations, response_time)
-    st.session_state.current_question = None
-    st.rerun()
+        # Extract other information
+        units = "3-4"  # Default
+        description = ""
+        relevance = ""
+        prerequisites = "None"
 
-if prompt := st.chat_input("What's your fitness or nutrition question?"):
-    add_message("user", prompt)
-    with st.chat_message("user"):
-        st.markdown(prompt)
-    response, recommendations, response_time = asyncio.run(
-        stream_response(prompt)
-    )
-    add_message("assistant", response, recommendations, response_time)
-    st.rerun()
+        for line in lines[1:]:
+            if "unit" in line.lower():
+                units = line.split(":")[1].strip() if ":" in line else line
+            elif "description" in line.lower():
+                description = line.split(":")[1].strip() if ":" in line else line
+            elif "relate" in line.lower() or "major" in line.lower():
+                relevance = line.split(":")[1].strip() if ":" in line else line
+            elif "prerequisite" in line.lower():
+                prerequisites = line.split(":")[1].strip() if ":" in line else line
 
-display_chat_history()
+        courses.append({
+            "code": code,
+            "title": title,
+            "units": units,
+            "description": description,
+            "relevance": relevance,
+            "prerequisites": prerequisites,
+        })
+
+    return courses
+
+
+###############################################################################
+# 11) DISPLAY RECOMMENDATIONS
+###############################################################################
+if st.button("Get Course Recommendations"):
+    with st.spinner("Fetching personalized course recommendations..."):
+        courses = get_course_recommendations(
+            major=st.session_state.selected_major,
+            prefix=st.session_state.course_prefix,
+            number=st.session_state.course_number,
+            completed=completed_courses,
+            interests=interests
+        )
+        st.session_state.recommendations = courses
+
+# Display recommendations
+if st.session_state.recommendations:
+    st.markdown("### 📘 Recommended Courses")
+    for course in st.session_state.recommendations:
+        st.markdown(f"""
+        <div class='course-card'>
+            <strong>{course['code']}: {course['title']}</strong><br>
+            <em>Units:</em> {course['units']}<br>
+            <em>Description:</em> {course['description']}<br>
+            <em>Relevance to Major:</em> {course['relevance']}<br>
+            <em>Prerequisites:</em> {course['prerequisites']}
+        </div>
+        """, unsafe_allow_html=True)
