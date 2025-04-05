@@ -1,61 +1,53 @@
-# Agentic RAG Fitness Chatbot
+# 🎓 SFSU Course Recommender
 
 ## Overview
-The Agentic RAG Fitness Chatbot is an AI-powered application designed to provide personalized fitness guidance and workout recommendations. Uses Retrieval-Augmented Generation (RAG), multi-agent systems, and a curated knowledge base, to deliver context-aware and actionable fitness advice. The chatbot focuses on empowering beginners with evidence-based fitness recommendations, real-time video demonstrations, and safety guidelines.
 
-### LangGraph Workflow
-The LangGraph Workflow outlines the sequence of nodes in the system’s architecture. Each node represents a specific function, from query handling to generating responses. Below is the compiled workflow:
+The **SFSU Course Recommender** is an interactive AI-powered application designed to help students at San Francisco State University discover relevant courses tailored to their major, academic level, and interests. Leveraging the Groq LLaMA3 model, a clean Streamlit interface, and dynamic prompt generation, this tool provides personalized course suggestions with detailed descriptions and relevance to a student's academic journey.
 
-![LangGraph Workflow](https://github.com/pramod-zillella/Agentic-Rag-Chatbot/blob/main/LangGraph-Workflow.png)
+This app is ideal for students looking for course planning guidance, elective exploration, and academic discovery based on real-time preferences.
+
+---
 
 ## Architecture
-The system consists of the following components:
 
-1. **User Input**: Accepts user queries through a Streamlit-based chat interface.
-2. **Query Refinement**: Transforms user input into an optimized format using an LLM-based query rewriting mechanism.
-3. **Retrieval System**:
-   - Encodes user queries using Sentence Transformers.
-   - Queries the Pinecone vector database to fetch relevant fitness data.
-   - Retrieves video demonstrations and transcripts.
-4. **Response Generation**: Synthesizes retrieved information using GPT-4o, ensuring the response is actionable and grounded in context.
-5. **Video Recommendations**: Displays video thumbnails, titles, and links alongside detailed transcripts.
-6. **Langsmith Integration**: Tracks agent-level decisions and improves overall system reliability.
+The system includes the following components:
 
-## Langsmith Trace and LangGraph Workflow
-To provide transparency and insights into the system's behavior, the Langsmith trace and LangGraph workflow have been visualized:
+1. **User Input Interface**:
+   - Built using Streamlit.
+   - Allows users to select their major, academic year, completed courses, and interests.
 
-### Langsmith Trace
-The Langsmith Trace captures the flow of the chatbot’s decision-making process, including tool calls and their respective responses. Below is an example trace showcasing a user query and the system's response:
+2. **LLM Integration (Groq LLaMA3)**:
+   - Queries are converted into structured prompts.
+   - Groq’s LLaMA3 model generates relevant course recommendations.
 
-![Langsmith Trace](https://github.com/pramod-zillella/AgenticRagChatbot/blob/main/Langsmith-Trace.png)
+3. **Dynamic Course Matching**:
+   - Users can search by department prefix and optionally include a course number.
+   - The model returns 3–5 recommended courses with key information.
+
+4. **Theme Toggle and Styling**:
+   - Users can toggle between Dark and Light themes for a personalized UI experience.
+   - Custom CSS provides a modern, animated interface with accessible formatting.
+
+5. **State Management**:
+   - Session state stores chat history and selections across user interactions.
+
+---
+
+## Sample Workflow
+
+1. Select your major and academic year.
+2. Optionally enter completed courses and interests.
+3. Choose a department prefix and/or course number.
+4. Click **“Get Course Recommendations.”**
+5. View detailed results including course title, units, description, relevance, and prerequisites.
+
+---
 
 ## Installation
 
 ### Steps
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/pramod-zillella/AgenticRagChatbot.git
-   cd agentic-rag-fitness-chatbot
-   ```
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Set up environment variables:
-   - Create a `.env` file in the project directory.
-   - Add your API keys:
-     ```
-     OPENAI_API_KEY=your_openai_api_key
-     PINECONE_API_KEY=your_pinecone_api_key
-     LANGCHAIN_API_KEY_V2=your_langchain_api_key
-     ```
-4. Run the Streamlit application:
-   ```bash
-   streamlit run interface.py
-   ```
 
-## Usage
-- **Predefined Questions**: Select from common fitness-related queries or type your own.
-- **Custom Queries**: Ask personalized questions about workouts, nutrition, or injury prevention.
-- **Interactive Recommendations**: View suggested video demonstrations and detailed response within the chat interface.
-
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/A-Singh15/sfsu-course-recommender.git
+   cd sfsu-course-recommender
