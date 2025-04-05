@@ -49,5 +49,5 @@ The system includes the following components:
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/your-username/sfsu-course-recommender.git
+   git clone https://github.com/A-Singh15/sfsu-course-recommender.git
    cd sfsu-course-recommender
